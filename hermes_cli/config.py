@@ -16,6 +16,7 @@ import os
 import platform
 import sys
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -677,8 +678,21 @@ def save_env_value(key: str, value: str):
             lines[-1] += "\n"
         lines.append(f"{key}={value}\n")
     
-    with open(env_path, 'w', **write_kw) as f:
-        f.writelines(lines)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(env_path.parent), prefix='.env_', suffix='.tmp'
+    )
+    try:
+        with os.fdopen(fd, 'w', **write_kw) as f:
+            f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_env_value(key: str) -> Optional[str]:
