@@ -3455,10 +3455,12 @@ class HermesCLI:
             from agent.insights import InsightsEngine
 
             db = SessionDB()
-            engine = InsightsEngine(db)
-            report = engine.generate(days=days, source=source)
-            print(engine.format_terminal(report))
-            db.close()
+            try:
+                engine = InsightsEngine(db)
+                report = engine.generate(days=days, source=source)
+                print(engine.format_terminal(report))
+            finally:
+                db.close()
         except Exception as e:
             print(f"  Error generating insights: {e}")
 
@@ -3504,39 +3506,40 @@ class HermesCLI:
         try:
             from hermes_state import SessionDB
             db = SessionDB()
-            session_id = getattr(self.agent, "session_id", None) if self.agent else None
+            try:
+                session_id = getattr(self.agent, "session_id", None) if self.agent else None
 
-            if show_stats:
-                rows = db.audit_log_stats(session_id=session_id, limit=limit)
-                db.close()
-                if not rows:
-                    print("  No audit log entries found.")
+                if show_stats:
+                    rows = db.audit_log_stats(session_id=session_id, limit=limit)
+                    if not rows:
+                        print("  No audit log entries found.")
+                        return
+                    total_calls = sum(r["call_count"] for r in rows)
+                    total_errors = sum(r["error_count"] or 0 for r in rows)
+                    print(f"\n  Tool-call statistics{' (this session)' if session_id else ''}:")
+                    print(f"  Total calls: {total_calls}  |  Errors: {total_errors}\n")
+                    print(f"  {'Tool':<30} {'Calls':>6} {'Errors':>7} {'Err%':>6} {'Avg ms':>7}")
+                    print("  " + "─" * 62)
+                    for r in rows:
+                        calls = r["call_count"]
+                        errors = r["error_count"] or 0
+                        err_pct = f"{errors / calls * 100:.0f}%" if calls else "—"
+                        avg_ms = r["avg_duration_ms"]
+                        avg_ms_str = str(avg_ms) if avg_ms is not None else "—"
+                        print(
+                            f"  {r['tool_name']:<30} {calls:>6} {errors:>7} "
+                            f"{err_pct:>6} {avg_ms_str:>7}"
+                        )
                     return
-                total_calls = sum(r["call_count"] for r in rows)
-                total_errors = sum(r["error_count"] or 0 for r in rows)
-                print(f"\n  Tool-call statistics{' (this session)' if session_id else ''}:")
-                print(f"  Total calls: {total_calls}  |  Errors: {total_errors}\n")
-                print(f"  {'Tool':<30} {'Calls':>6} {'Errors':>7} {'Err%':>6} {'Avg ms':>7}")
-                print("  " + "─" * 62)
-                for r in rows:
-                    calls = r["call_count"]
-                    errors = r["error_count"] or 0
-                    err_pct = f"{errors / calls * 100:.0f}%" if calls else "—"
-                    avg_ms = r["avg_duration_ms"]
-                    avg_ms_str = str(avg_ms) if avg_ms is not None else "—"
-                    print(
-                        f"  {r['tool_name']:<30} {calls:>6} {errors:>7} "
-                        f"{err_pct:>6} {avg_ms_str:>7}"
-                    )
-                return
 
-            entries = db.query_audit_log(
-                session_id=session_id,
-                tool_name=tool_filter,
-                errors_only=errors_only,
-                limit=limit,
-            )
-            db.close()
+                entries = db.query_audit_log(
+                    session_id=session_id,
+                    tool_name=tool_filter,
+                    errors_only=errors_only,
+                    limit=limit,
+                )
+            finally:
+                db.close()
 
             if not entries:
                 print("  No audit log entries found.")

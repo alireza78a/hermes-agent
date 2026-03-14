@@ -388,10 +388,12 @@ def _resolve_last_cli_session() -> Optional[str]:
     try:
         from hermes_state import SessionDB
         db = SessionDB()
-        sessions = db.search_sessions(source="cli", limit=1)
-        db.close()
-        if sessions:
-            return sessions[0]["id"]
+        try:
+            sessions = db.search_sessions(source="cli", limit=1)
+            if sessions:
+                return sessions[0]["id"]
+        finally:
+            db.close()
     except Exception:
         pass
     return None
@@ -407,17 +409,17 @@ def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
     try:
         from hermes_state import SessionDB
         db = SessionDB()
+        try:
+            # Try as exact session ID first
+            session = db.get_session(name_or_id)
+            if session:
+                return session["id"]
 
-        # Try as exact session ID first
-        session = db.get_session(name_or_id)
-        if session:
+            # Try as title (with auto-latest for lineage)
+            session_id = db.resolve_session_by_title(name_or_id)
+            return session_id
+        finally:
             db.close()
-            return session["id"]
-
-        # Try as title (with auto-latest for lineage)
-        session_id = db.resolve_session_by_title(name_or_id)
-        db.close()
-        return session_id
     except Exception:
         pass
     return None
@@ -2915,7 +2917,8 @@ For more help on a command:
             print(f"Error: Could not open session database: {e}")
             return
 
-        action = args.sessions_action
+        try:
+            action = args.sessions_action
 
         if action == "list":
             sessions = db.list_sessions_rich(source=args.source, limit=args.limit)
@@ -3020,7 +3023,6 @@ For more help on a command:
             limit = getattr(args, "limit", 50) or 50
             source = getattr(args, "source", None)
             sessions = db.list_sessions_rich(source=source, limit=limit)
-            db.close()
             if not sessions:
                 print("No sessions found.")
                 return
@@ -3060,8 +3062,8 @@ For more help on a command:
 
         else:
             sessions_parser.print_help()
-
-        db.close()
+        finally:
+            db.close()
 
     sessions_parser.set_defaults(func=cmd_sessions)
 
@@ -3116,9 +3118,10 @@ For more help on a command:
             print(f"Error: Could not open session database: {e}")
             return
 
-        action = getattr(args, "audit_action", None)
+        try:
+            action = getattr(args, "audit_action", None)
 
-        def _fmt_ts(ts):
+            def _fmt_ts(ts):
             if not ts:
                 return "?"
             return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
@@ -3149,7 +3152,6 @@ For more help on a command:
                 errors_only=getattr(args, "errors", False),
                 limit=args.limit,
             )
-            db.close()
 
             if not entries:
                 print("No audit log entries found.")
@@ -3182,7 +3184,6 @@ For more help on a command:
                 since=since_ts,
                 limit=args.limit,
             )
-            db.close()
 
             if not rows:
                 print("No audit log entries found.")
@@ -3206,6 +3207,7 @@ For more help on a command:
 
         else:
             audit_parser.print_help()
+        finally:
             db.close()
 
     audit_parser.set_defaults(func=cmd_audit)
@@ -3227,10 +3229,12 @@ For more help on a command:
             from agent.insights import InsightsEngine
 
             db = SessionDB()
-            engine = InsightsEngine(db)
-            report = engine.generate(days=args.days, source=args.source)
-            print(engine.format_terminal(report))
-            db.close()
+            try:
+                engine = InsightsEngine(db)
+                report = engine.generate(days=args.days, source=args.source)
+                print(engine.format_terminal(report))
+            finally:
+                db.close()
         except Exception as e:
             print(f"Error generating insights: {e}")
 

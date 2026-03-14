@@ -808,7 +808,8 @@ class SessionDB:
     # Keywords whose matching argument keys are redacted before storage.
     _SENSITIVE_KEY_FRAGMENTS = frozenset({
         "password", "secret", "token", "api_key", "apikey",
-        "key", "auth", "credential",
+        "private_key", "secret_key", "auth_token", "auth_key",
+        "credential",
     })
 
     @classmethod
@@ -841,6 +842,7 @@ class SessionDB:
         automatically redacted before storage.  Returns the new row ID.
         """
         safe_args = self._redact_arguments(arguments) if arguments else None
+        capped_summary = (result_summary or "")[:500] or None
         cursor = self._conn.execute(
             """INSERT INTO audit_log
                (session_id, timestamp, tool_name, arguments,
@@ -851,7 +853,7 @@ class SessionDB:
                 time.time(),
                 tool_name,
                 json.dumps(safe_args, ensure_ascii=False) if safe_args else None,
-                result_summary,
+                capped_summary,
                 duration_ms,
                 1 if is_error else 0,
             ),
@@ -1043,6 +1045,9 @@ class SessionDB:
             # Duplicate handling
             if sid in existing_ids:
                 if overwrite:
+                    self._conn.execute(
+                        "DELETE FROM audit_log WHERE session_id = ?", (sid,)
+                    )
                     self._conn.execute(
                         "DELETE FROM messages WHERE session_id = ?", (sid,)
                     )
