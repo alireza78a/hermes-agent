@@ -1899,7 +1899,7 @@ class AIAgent:
     def _get_tool_call_id_static(tc) -> str:
         """Extract call ID from a tool_call entry (dict or object)."""
         if isinstance(tc, dict):
-            return tc.get("id", "")
+            return tc.get("id", "") or ""
         return getattr(tc, "id", "") or ""
 
     @staticmethod
@@ -1981,15 +1981,22 @@ class AIAgent:
         object if no truncation was needed.
         """
         from tools.delegate_tool import MAX_CONCURRENT_CHILDREN
-        delegate_tcs = [tc for tc in tool_calls if tc.function.name == "delegate_task"]
-        if len(delegate_tcs) <= MAX_CONCURRENT_CHILDREN:
+        delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
+        if delegate_count <= MAX_CONCURRENT_CHILDREN:
             return tool_calls
-        non_delegate = [tc for tc in tool_calls if tc.function.name != "delegate_task"]
-        truncated = non_delegate + delegate_tcs[:MAX_CONCURRENT_CHILDREN]
+        kept_delegates = 0
+        truncated = []
+        for tc in tool_calls:
+            if tc.function.name == "delegate_task":
+                if kept_delegates < MAX_CONCURRENT_CHILDREN:
+                    truncated.append(tc)
+                    kept_delegates += 1
+            else:
+                truncated.append(tc)
         logger.warning(
             "Truncated %d excess delegate_task call(s) to enforce "
             "MAX_CONCURRENT_CHILDREN=%d limit",
-            len(delegate_tcs) - MAX_CONCURRENT_CHILDREN, MAX_CONCURRENT_CHILDREN,
+            delegate_count - MAX_CONCURRENT_CHILDREN, MAX_CONCURRENT_CHILDREN,
         )
         return truncated
 

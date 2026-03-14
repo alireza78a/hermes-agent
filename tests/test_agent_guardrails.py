@@ -184,6 +184,27 @@ class TestCapDelegateTaskCalls:
         AIAgent._cap_delegate_task_calls(tcs)
         assert len(tcs) == original_len
 
+    def test_interleaved_order_preserved(self):
+        """Original ordering of delegate and non-delegate calls is preserved."""
+        d1 = make_tc("delegate_task", '{"task":"a"}')
+        t1 = make_tc("terminal", '{"cmd":"ls"}')
+        d2 = make_tc("delegate_task", '{"task":"b"}')
+        w1 = make_tc("web_search", '{"q":"x"}')
+        d3 = make_tc("delegate_task", '{"task":"c"}')
+        d4 = make_tc("delegate_task", '{"task":"d"}')  # excess
+        tcs = [d1, t1, d2, w1, d3, d4]
+        out = AIAgent._cap_delegate_task_calls(tcs)
+        names = [tc.function.name for tc in out]
+        # Only first MAX_CONCURRENT_CHILDREN delegates kept, but relative
+        # order with non-delegates must be preserved.
+        assert names == ["delegate_task", "terminal", "delegate_task",
+                         "web_search", "delegate_task"]
+        assert out[0] is d1
+        assert out[1] is t1
+        assert out[2] is d2
+        assert out[3] is w1
+        assert out[4] is d3
+
 
 # ---------------------------------------------------------------------------
 # Phase 2b — _deduplicate_tool_calls
@@ -267,3 +288,47 @@ class TestDeduplicateToolCalls:
         original_len = len(tcs)
         AIAgent._deduplicate_tool_calls(tcs)
         assert len(tcs) == original_len
+
+    def test_json_key_order_treated_as_distinct(self):
+        """Different JSON key ordering produces different argument strings.
+
+        Deduplication uses raw string comparison, so semantically equivalent
+        JSON with different key order is intentionally treated as distinct.
+        This test documents that behaviour explicitly.
+        """
+        tcs = [
+            make_tc("web_search", '{"query":"foo","lang":"en"}'),
+            make_tc("web_search", '{"lang":"en","query":"foo"}'),
+        ]
+        out = AIAgent._deduplicate_tool_calls(tcs)
+        assert len(out) == 2
+        assert out is tcs  # no dedup happened — same object returned
+
+
+# ---------------------------------------------------------------------------
+# _get_tool_call_id_static
+# ---------------------------------------------------------------------------
+
+class TestGetToolCallIdStatic:
+    """AIAgent._get_tool_call_id_static() extracts call IDs from dicts and objects."""
+
+    def test_dict_with_valid_id(self):
+        assert AIAgent._get_tool_call_id_static({"id": "call_123"}) == "call_123"
+
+    def test_dict_with_none_id(self):
+        assert AIAgent._get_tool_call_id_static({"id": None}) == ""
+
+    def test_dict_without_id_key(self):
+        assert AIAgent._get_tool_call_id_static({"function": {}}) == ""
+
+    def test_object_with_valid_id(self):
+        tc = types.SimpleNamespace(id="call_456")
+        assert AIAgent._get_tool_call_id_static(tc) == "call_456"
+
+    def test_object_with_none_id(self):
+        tc = types.SimpleNamespace(id=None)
+        assert AIAgent._get_tool_call_id_static(tc) == ""
+
+    def test_object_without_id_attr(self):
+        tc = types.SimpleNamespace()
+        assert AIAgent._get_tool_call_id_static(tc) == ""
