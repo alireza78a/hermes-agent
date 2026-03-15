@@ -13,8 +13,14 @@ Supported verifications (MVP):
 
 The verifier is deliberately conservative: it only fires for operations it
 understands and attaches a structured ``_verification`` block to the tool
-result JSON.  On mismatch it sets ``verified: false`` with a human-readable
-``message`` that the model can use to decide whether to retry or replan.
+result JSON.  Status is one of:
+
+  - ``"verified"``  — world state matches expectations
+  - ``"warning"``   — result may be incomplete (e.g. empty file)
+  - ``"mismatch"``  — environment state contradicts tool output
+
+On warning or mismatch a top-level ``_warning`` string is injected so the
+model cannot ignore the signal.
 
 Integration point:
   model_tools.handle_function_call() calls ``verify_tool_result()`` after
@@ -37,10 +43,16 @@ logger = logging.getLogger(__name__)
 # Verification result
 # ---------------------------------------------------------------------------
 
+# Valid status values for VerificationResult.status
+VERIFIED = "verified"
+WARNING = "warning"
+MISMATCH = "mismatch"
+
+
 @dataclass
 class VerificationResult:
     """Structured outcome of a post-tool verification check."""
-    verified: bool
+    status: str  # "verified", "warning", or "mismatch"
     tool_name: str
     check: str  # short label, e.g. "dir_exists", "file_written"
     message: str = ""
@@ -48,7 +60,7 @@ class VerificationResult:
 
     def to_dict(self) -> dict:
         d: dict = {
-            "verified": self.verified,
+            "status": self.status,
             "tool": self.tool_name,
             "check": self.check,
         }
@@ -155,10 +167,10 @@ def _verify_terminal(args: Dict[str, Any], result_data: Dict[str, Any]) -> Optio
 
         exists = os.path.isdir(target)
         return VerificationResult(
-            verified=exists,
+            status=VERIFIED if exists else MISMATCH,
             tool_name="terminal",
             check="git_clone_dir_exists",
-            message="" if exists else f"VERIFICATION FAILED: git clone target directory does not exist: {target}",
+            message="" if exists else f"git clone target directory does not exist: {target}",
             details={"expected_dir": target, "exists": exists},
         )
 
@@ -168,10 +180,10 @@ def _verify_terminal(args: Dict[str, Any], result_data: Dict[str, Any]) -> Optio
         target = _resolve_path(m2.group(1))
         exists = os.path.isdir(target)
         return VerificationResult(
-            verified=exists,
+            status=VERIFIED if exists else MISMATCH,
             tool_name="terminal",
             check="mkdir_dir_exists",
-            message="" if exists else f"VERIFICATION FAILED: mkdir target does not exist: {target}",
+            message="" if exists else f"mkdir target does not exist: {target}",
             details={"expected_dir": target, "exists": exists},
         )
 
@@ -197,20 +209,20 @@ def _verify_write_file(args: Dict[str, Any], result_data: Dict[str, Any]) -> Opt
             details["size_bytes"] = size
             if size == 0:
                 return VerificationResult(
-                    verified=False,
+                    status=WARNING,
                     tool_name="write_file",
                     check="file_written",
-                    message=f"VERIFICATION WARNING: file was written but is empty: {resolved}",
+                    message=f"file was written but is empty: {resolved}",
                     details=details,
                 )
         except OSError:
             pass
 
     return VerificationResult(
-        verified=exists,
+        status=VERIFIED if exists else MISMATCH,
         tool_name="write_file",
         check="file_written",
-        message="" if exists else f"VERIFICATION FAILED: written file does not exist: {resolved}",
+        message="" if exists else f"written file does not exist: {resolved}",
         details=details,
     )
 
@@ -236,16 +248,16 @@ def _verify_patch(args: Dict[str, Any], result_data: Dict[str, Any]) -> Optional
         if not os.path.exists(resolved):
             missing.append(resolved)
 
-    verified = len(missing) == 0 and len(all_files) > 0
+    ok = len(missing) == 0 and len(all_files) > 0
     details: Dict[str, Any] = {"files_checked": [_resolve_path(f) for f in all_files]}
     if missing:
         details["missing"] = missing
 
     return VerificationResult(
-        verified=verified,
+        status=VERIFIED if ok else MISMATCH,
         tool_name="patch",
         check="patched_files_exist",
-        message="" if verified else f"VERIFICATION FAILED: patched file(s) missing: {', '.join(missing)}",
+        message="" if ok else f"patched file(s) missing: {', '.join(missing)}",
         details=details,
     )
 
@@ -308,11 +320,17 @@ def verify_tool_result(
 
     result_data["_verification"] = vr.to_dict()
 
-    if not vr.verified:
-        logger.warning("Execution verification FAILED for %s: %s", tool_name, vr.message)
+    if vr.status == WARNING:
+        logger.warning("Execution verification WARNING for %s: %s", tool_name, vr.message)
         result_data["_warning"] = (
-            "\u26a0\ufe0f VERIFICATION FAILED: Do not assume this step succeeded. "
+            "\u26a0\ufe0f VERIFICATION WARNING: Result may be incomplete. "
             "Re-check environment before proceeding."
+        )
+    elif vr.status == MISMATCH:
+        logger.warning("Execution verification MISMATCH for %s: %s", tool_name, vr.message)
+        result_data["_warning"] = (
+            "\u274c VERIFICATION FAILED: Tool result conflicts with environment state. "
+            "Do not assume this step succeeded. Re-check or retry."
         )
 
     return json.dumps(result_data, ensure_ascii=False)

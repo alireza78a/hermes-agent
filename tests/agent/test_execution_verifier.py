@@ -12,6 +12,9 @@ from agent.execution_verifier import (
     _verify_terminal,
     _verify_write_file,
     _verify_patch,
+    VERIFIED,
+    WARNING,
+    MISMATCH,
 )
 
 
@@ -20,26 +23,35 @@ from agent.execution_verifier import (
 # ===================================================================
 
 class TestVerificationResult:
-    def test_to_dict_success(self):
+    def test_to_dict_verified(self):
         vr = VerificationResult(
-            verified=True, tool_name="terminal", check="git_clone_dir_exists",
+            status=VERIFIED, tool_name="terminal", check="git_clone_dir_exists",
         )
         d = vr.to_dict()
-        assert d["verified"] is True
+        assert d["status"] == "verified"
         assert d["tool"] == "terminal"
         assert d["check"] == "git_clone_dir_exists"
         assert "message" not in d  # empty message excluded
 
-    def test_to_dict_failure_includes_message(self):
+    def test_to_dict_mismatch_includes_message(self):
         vr = VerificationResult(
-            verified=False, tool_name="write_file", check="file_written",
-            message="VERIFICATION FAILED: file missing",
+            status=MISMATCH, tool_name="write_file", check="file_written",
+            message="written file does not exist: /tmp/foo.py",
             details={"expected_path": "/tmp/foo.py", "exists": False},
         )
         d = vr.to_dict()
-        assert d["verified"] is False
-        assert "VERIFICATION FAILED" in d["message"]
+        assert d["status"] == "mismatch"
+        assert "does not exist" in d["message"]
         assert d["details"]["exists"] is False
+
+    def test_to_dict_warning(self):
+        vr = VerificationResult(
+            status=WARNING, tool_name="write_file", check="file_written",
+            message="file was written but is empty: /tmp/empty.txt",
+        )
+        d = vr.to_dict()
+        assert d["status"] == "warning"
+        assert "empty" in d["message"]
 
 
 # ===================================================================
@@ -54,7 +66,7 @@ class TestTerminalVerifier:
         result_data = {"output": "Cloning...", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
         assert vr.check == "git_clone_dir_exists"
 
     def test_git_clone_with_explicit_dir_missing(self, tmp_path):
@@ -63,12 +75,10 @@ class TestTerminalVerifier:
         result_data = {"output": "Cloning...", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is False
-        assert "VERIFICATION FAILED" in vr.message
+        assert vr.status == MISMATCH
+        assert "does not exist" in vr.message
 
     def test_git_clone_inferred_dir_exists(self, tmp_path):
-        # Simulate: git clone https://github.com/user/my-project.git
-        # Should infer dir name "my-project" relative to workdir
         target = tmp_path / "my-project"
         target.mkdir()
         args = {
@@ -78,7 +88,7 @@ class TestTerminalVerifier:
         result_data = {"output": "Cloning...", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
 
     def test_git_clone_inferred_dir_missing(self, tmp_path):
         args = {
@@ -88,7 +98,7 @@ class TestTerminalVerifier:
         result_data = {"output": "Cloning...", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is False
+        assert vr.status == MISMATCH
 
     def test_git_clone_nonzero_exit_skipped(self):
         args = {"command": "git clone https://github.com/user/repo.git /tmp/x"}
@@ -103,7 +113,7 @@ class TestTerminalVerifier:
         result_data = {"output": "", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
         assert vr.check == "mkdir_dir_exists"
 
     def test_mkdir_missing(self, tmp_path):
@@ -112,7 +122,7 @@ class TestTerminalVerifier:
         result_data = {"output": "", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is False
+        assert vr.status == MISMATCH
 
     def test_unrelated_command_returns_none(self):
         args = {"command": "ls -la"}
@@ -127,7 +137,7 @@ class TestTerminalVerifier:
         result_data = {"output": "Cloning...", "exit_code": 0, "error": None}
         vr = _verify_terminal(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
 
 
 # ===================================================================
@@ -142,7 +152,7 @@ class TestWriteFileVerifier:
         result_data = {"bytes_written": 14}
         vr = _verify_write_file(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
         assert vr.details["size_bytes"] == 14
 
     def test_file_missing(self, tmp_path):
@@ -150,8 +160,8 @@ class TestWriteFileVerifier:
         result_data = {"bytes_written": 10}
         vr = _verify_write_file(args, result_data)
         assert vr is not None
-        assert vr.verified is False
-        assert "VERIFICATION FAILED" in vr.message
+        assert vr.status == MISMATCH
+        assert "does not exist" in vr.message
 
     def test_file_exists_but_empty(self, tmp_path):
         f = tmp_path / "empty.txt"
@@ -160,7 +170,7 @@ class TestWriteFileVerifier:
         result_data = {"bytes_written": 0}
         vr = _verify_write_file(args, result_data)
         assert vr is not None
-        assert vr.verified is False
+        assert vr.status == WARNING
         assert "empty" in vr.message.lower()
 
     def test_skipped_on_error_result(self):
@@ -188,7 +198,7 @@ class TestPatchVerifier:
         result_data = {"success": True, "diff": "...", "files_modified": [str(f)]}
         vr = _verify_patch(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
 
     def test_patched_file_missing(self, tmp_path):
         missing = str(tmp_path / "gone.py")
@@ -196,7 +206,7 @@ class TestPatchVerifier:
         result_data = {"success": True, "diff": "...", "files_modified": [missing]}
         vr = _verify_patch(args, result_data)
         assert vr is not None
-        assert vr.verified is False
+        assert vr.status == MISMATCH
         assert "missing" in vr.message.lower()
 
     def test_replace_mode_fallback_to_path_arg(self, tmp_path):
@@ -204,10 +214,9 @@ class TestPatchVerifier:
         f.write_text("const x = 1;")
         args = {"path": str(f), "old_string": "const x = 1;", "new_string": "const x = 2;"}
         result_data = {"success": True, "diff": "..."}
-        # No files_modified or files_created in result (replace mode)
         vr = _verify_patch(args, result_data)
         assert vr is not None
-        assert vr.verified is True
+        assert vr.status == VERIFIED
 
     def test_skipped_on_failure(self):
         args = {"path": "/tmp/foo.py"}
@@ -229,8 +238,8 @@ class TestVerifyToolResult:
         result = verify_tool_result("terminal", args, original)
         parsed = json.loads(result)
         assert "_verification" in parsed
-        assert parsed["_verification"]["verified"] is True
-        assert "_warning" not in parsed  # no warning on success
+        assert parsed["_verification"]["status"] == "verified"
+        assert "_warning" not in parsed  # no warning on verified
 
     def test_augments_write_file_result(self, tmp_path):
         f = tmp_path / "out.txt"
@@ -240,8 +249,8 @@ class TestVerifyToolResult:
         result = verify_tool_result("write_file", args, original)
         parsed = json.loads(result)
         assert "_verification" in parsed
-        assert parsed["_verification"]["verified"] is True
-        assert "_warning" not in parsed  # no warning on success
+        assert parsed["_verification"]["status"] == "verified"
+        assert "_warning" not in parsed  # no warning on verified
 
     def test_no_verifier_returns_unchanged(self):
         original = json.dumps({"results": [1, 2, 3]})
@@ -257,37 +266,53 @@ class TestVerifyToolResult:
         original = json.dumps({"output": "hello", "exit_code": 0, "error": None})
         result = verify_tool_result("terminal", {"command": "echo hello"}, original)
         parsed = json.loads(result)
-        # No _verification because echo doesn't trigger any verifier
         assert "_verification" not in parsed
 
-    def test_failure_propagates_warning_message(self, tmp_path):
+    # --- mismatch cases: ❌ VERIFICATION FAILED ---
+
+    def test_mismatch_terminal_has_failed_warning(self, tmp_path):
         missing = str(tmp_path / "nope")
         args = {"command": f"git clone https://github.com/x/repo.git {missing}"}
         original = json.dumps({"output": "done", "exit_code": 0, "error": None})
         result = verify_tool_result("terminal", args, original)
         parsed = json.loads(result)
-        assert parsed["_verification"]["verified"] is False
-        assert "VERIFICATION FAILED" in parsed["_verification"]["message"]
-        # Top-level _warning must be present and prominent
+        assert parsed["_verification"]["status"] == "mismatch"
         assert "_warning" in parsed
         assert "VERIFICATION FAILED" in parsed["_warning"]
-        assert "Do not assume this step succeeded" in parsed["_warning"]
+        assert "conflicts with environment state" in parsed["_warning"]
 
-    def test_write_file_missing_has_top_level_warning(self, tmp_path):
+    def test_mismatch_write_file_has_failed_warning(self, tmp_path):
         args = {"path": str(tmp_path / "gone.py")}
         original = json.dumps({"bytes_written": 10})
         result = verify_tool_result("write_file", args, original)
         parsed = json.loads(result)
-        assert parsed["_verification"]["verified"] is False
+        assert parsed["_verification"]["status"] == "mismatch"
         assert "_warning" in parsed
         assert "VERIFICATION FAILED" in parsed["_warning"]
+        assert "conflicts with environment state" in parsed["_warning"]
 
-    def test_patch_missing_has_top_level_warning(self, tmp_path):
+    def test_mismatch_patch_has_failed_warning(self, tmp_path):
         missing = str(tmp_path / "deleted.py")
         args = {"path": missing}
         original = json.dumps({"success": True, "diff": "...", "files_modified": [missing]})
         result = verify_tool_result("patch", args, original)
         parsed = json.loads(result)
-        assert parsed["_verification"]["verified"] is False
+        assert parsed["_verification"]["status"] == "mismatch"
         assert "_warning" in parsed
-        assert "Do not assume this step succeeded" in parsed["_warning"]
+        assert "VERIFICATION FAILED" in parsed["_warning"]
+
+    # --- warning cases: ⚠️ VERIFICATION WARNING ---
+
+    def test_warning_empty_file_has_warning_text(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_text("")
+        args = {"path": str(f)}
+        original = json.dumps({"bytes_written": 0})
+        result = verify_tool_result("write_file", args, original)
+        parsed = json.loads(result)
+        assert parsed["_verification"]["status"] == "warning"
+        assert "_warning" in parsed
+        assert "VERIFICATION WARNING" in parsed["_warning"]
+        assert "Result may be incomplete" in parsed["_warning"]
+        # Must NOT contain the mismatch text
+        assert "VERIFICATION FAILED" not in parsed["_warning"]
