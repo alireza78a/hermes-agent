@@ -28,6 +28,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import registry
 from toolsets import resolve_toolset, validate_toolset
+from agent.execution_verifier import verify_tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -308,11 +309,12 @@ def handle_function_call(
                 enabled_tools=sandbox_enabled,
             )
 
-        return registry.dispatch(
+        result = registry.dispatch(
             function_name, function_args,
             task_id=task_id,
             user_task=user_task,
         )
+        return verify_tool_result(function_name, function_args, result)
 
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
