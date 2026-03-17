@@ -574,7 +574,7 @@ class ShellFileOperations(FileOperations):
             )
         
         # Get base64 content
-        b64_cmd = f"base64 -w 0 {self._escape_shell_arg(path)} 2>/dev/null"
+        b64_cmd = f"base64 {self._escape_shell_arg(path)} 2>/dev/null | tr -d '\\n'"
         b64_result = self._exec(b64_cmd, timeout=30)
         
         if b64_result.exit_code != 0:
