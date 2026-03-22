@@ -12,6 +12,8 @@ import os
 import threading
 from unittest.mock import MagicMock, patch
 
+from tools.interrupt import install_interrupt_event
+
 from tools.environments.local import (
     LocalEnvironment,
     _HERMES_PROVIDER_ENV_BLOCKLIST,
@@ -37,6 +39,7 @@ def _run_with_env(extra_os_env=None, self_env=None):
     and return the env dict passed to the subprocess."""
     captured = {}
     fake_interrupt = threading.Event()
+    install_interrupt_event(fake_interrupt)
     test_environ = {
         "PATH": "/usr/bin:/bin",
         "HOME": "/home/user",
@@ -49,7 +52,6 @@ def _run_with_env(extra_os_env=None, self_env=None):
 
     with patch("tools.environments.local._find_bash", return_value="/bin/bash"), \
          patch("subprocess.Popen", side_effect=_make_fake_popen(captured)), \
-         patch("tools.terminal_tool._interrupt_event", fake_interrupt), \
          patch.dict(os.environ, test_environ, clear=True):
         env.execute("echo hello")
 

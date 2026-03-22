@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # The terminal tool polls this during command execution so it can kill
 # long-running subprocesses immediately instead of blocking until timeout.
 # ---------------------------------------------------------------------------
-from tools.interrupt import set_interrupt as set_interrupt_event, is_interrupted, _interrupt_event
+from tools.interrupt import set_interrupt as set_interrupt_event, is_interrupted, get_interrupt_event
 
 
 # Add mini-swe-agent to path if not installed. In git worktrees the populated

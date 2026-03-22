@@ -724,15 +724,24 @@ class TestLoadConfig(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestInterruptHandling(unittest.TestCase):
+    def setUp(self):
+        self._test_event = threading.Event()
+        from tools.interrupt import install_interrupt_event
+        install_interrupt_event(self._test_event)
+
+    def tearDown(self):
+        self._test_event.clear()
+
     def test_interrupt_event_stops_execution(self):
         """When _interrupt_event is set, execute_code should stop the script."""
         code = "import time; time.sleep(60); print('should not reach')"
 
         def set_interrupt_after_delay():
             import time as _t
+            from tools.interrupt import install_interrupt_event
+            install_interrupt_event(self._test_event)
             _t.sleep(1)
-            from tools.terminal_tool import _interrupt_event
-            _interrupt_event.set()
+            self._test_event.set()
 
         t = threading.Thread(target=set_interrupt_after_delay, daemon=True)
         t.start()
@@ -749,8 +758,7 @@ class TestInterruptHandling(unittest.TestCase):
             self.assertEqual(result["status"], "interrupted")
             self.assertIn("interrupted", result["output"])
         finally:
-            from tools.terminal_tool import _interrupt_event
-            _interrupt_event.clear()
+            self._test_event.clear()
             t.join(timeout=3)
 
 

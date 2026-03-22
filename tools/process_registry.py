@@ -486,7 +486,8 @@ class ProcessRegistry:
             dict with status ("exited", "timeout", "interrupted", "not_found")
             and output snapshot.
         """
-        from tools.terminal_tool import _interrupt_event
+        from tools.interrupt import get_interrupt_event
+        _interrupt_event = get_interrupt_event()
 
         default_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
         max_timeout = default_timeout

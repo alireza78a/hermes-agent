@@ -1,12 +1,14 @@
 """Tests for the interrupt system.
 
-Run with: python -m pytest tests/test_interrupt.py -v
+Run with: python -m pytest tests/tools/test_interrupt.py -v
 """
 
 import queue
 import threading
 import time
 import pytest
+
+from tools.interrupt import install_interrupt_event
 
 
 # ---------------------------------------------------------------------------
@@ -15,6 +17,13 @@ import pytest
 
 class TestInterruptModule:
     """Tests for tools/interrupt.py"""
+
+    def setup_method(self):
+        self._event = threading.Event()
+        install_interrupt_event(self._event)
+
+    def teardown_method(self):
+        self._event.clear()
 
     def test_set_and_check(self):
         from tools.interrupt import set_interrupt, is_interrupted
@@ -30,11 +39,14 @@ class TestInterruptModule:
     def test_thread_safety(self):
         """Set from one thread, check from another."""
         from tools.interrupt import set_interrupt, is_interrupted
+        event = self._event  # shared Event between threads
         set_interrupt(False)
 
         seen = {"value": False}
 
         def _checker():
+            # Worker thread must install the same Event
+            install_interrupt_event(event)
             while not is_interrupted():
                 time.sleep(0.01)
             seen["value"] = True
@@ -173,6 +185,8 @@ class TestSIGKILLEscalation:
         from tools.interrupt import set_interrupt
         from tools.environments.local import LocalEnvironment
 
+        event = threading.Event()
+        install_interrupt_event(event)
         set_interrupt(False)
         env = LocalEnvironment(cwd="/tmp", timeout=30)
 
@@ -180,6 +194,8 @@ class TestSIGKILLEscalation:
         result_holder = {"value": None}
 
         def _run():
+            # Worker thread needs the same Event installed
+            install_interrupt_event(event)
             result_holder["value"] = env.execute(
                 "trap '' TERM; sleep 60",
                 timeout=30,

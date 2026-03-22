@@ -24,6 +24,7 @@ import atexit
 import asyncio
 import base64
 import concurrent.futures
+import contextvars
 import copy
 import hashlib
 import json
@@ -65,7 +66,7 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 # Import our tool system
 from model_tools import get_tool_definitions, handle_function_call, check_toolset_requirements
 from tools.terminal_tool import cleanup_vm
-from tools.interrupt import set_interrupt as _set_interrupt
+from tools.interrupt import install_interrupt_event as _install_interrupt_event
 from tools.browser_tool import cleanup_browser
 
 import requests
@@ -541,6 +542,7 @@ class AIAgent:
         self._executing_tools = False
 
         # Interrupt mechanism for breaking out of tool loops
+        self._interrupt_event = threading.Event()  # per-agent, tool-visible signal
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
         self._client_lock = threading.RLock()
@@ -1939,7 +1941,7 @@ class AIAgent:
         self._interrupt_requested = True
         self._interrupt_message = message
         # Signal all tools to abort any in-flight operations immediately
-        _set_interrupt(True)
+        self._interrupt_event.set()
         # Propagate interrupt to any running child agents (subagent delegation)
         with self._active_children_lock:
             children_copy = list(self._active_children)
@@ -1952,10 +1954,10 @@ class AIAgent:
             print(f"\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
     
     def clear_interrupt(self) -> None:
-        """Clear any pending interrupt request and the global tool interrupt signal."""
+        """Clear any pending interrupt request and the per-agent tool interrupt signal."""
         self._interrupt_requested = False
         self._interrupt_message = None
-        _set_interrupt(False)
+        self._interrupt_event.clear()
     
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
@@ -1987,7 +1989,7 @@ class AIAgent:
             self._todo_store.write(last_todo_response, merge=False)
             if not self.quiet_mode:
                 self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
-        _set_interrupt(False)
+        self._interrupt_event.clear()
     
     @property
     def is_interrupted(self) -> bool:
@@ -4769,10 +4771,13 @@ class AIAgent:
 
         try:
             max_workers = min(num_tools, _MAX_TOOL_WORKERS)
+            # Snapshot the current context so child threads inherit the
+            # ContextVar holding this agent's interrupt Event.
+            _parent_ctx = contextvars.copy_context()
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for i, (tc, name, args) in enumerate(parsed_calls):
-                    f = executor.submit(_run_tool, i, tc, name, args)
+                    f = executor.submit(_parent_ctx.run, _run_tool, i, tc, name, args)
                     futures.append(f)
 
                 # Wait for all to complete (exceptions are captured inside _run_tool)
@@ -5558,6 +5563,10 @@ class AIAgent:
         truncated_response_prefix = ""
         compression_attempts = 0
         
+        # Install this agent's interrupt Event into the ContextVar so all
+        # tools called from this thread (and its ThreadPoolExecutor children)
+        # see the correct per-agent signal.
+        _install_interrupt_event(self._interrupt_event)
         # Clear any stale interrupt state at start
         self.clear_interrupt()
         
