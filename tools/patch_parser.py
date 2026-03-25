@@ -391,13 +391,13 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
         if search_lines:
             search_pattern = '\n'.join(search_lines)
             replacement = '\n'.join(replace_lines)
-            
+
             # Use fuzzy matching
             from tools.fuzzy_match import fuzzy_find_and_replace
             new_content, count, error = fuzzy_find_and_replace(
                 new_content, search_pattern, replacement, replace_all=False
             )
-            
+
             if error and count == 0:
                 # Try with context hint if available
                 if hunk.context_hint:
@@ -408,17 +408,32 @@ def _apply_update(op: PatchOperation, file_ops: Any) -> Tuple[bool, str]:
                         window_start = max(0, hint_pos - 500)
                         window_end = min(len(new_content), hint_pos + 2000)
                         window = new_content[window_start:window_end]
-                        
+
                         window_new, count, error = fuzzy_find_and_replace(
                             window, search_pattern, replacement, replace_all=False
                         )
-                        
+
                         if count > 0:
                             new_content = new_content[:window_start] + window_new + new_content[window_end:]
                             error = None
-                
+
                 if error:
                     return False, f"Could not apply hunk: {error}"
+        elif replace_lines:
+            # No search lines — use context hint as insertion anchor
+            addition = '\n'.join(replace_lines)
+            if hunk.context_hint:
+                hint_pos = new_content.find(hunk.context_hint)
+                if hint_pos != -1:
+                    insert_pos = new_content.find('\n', hint_pos)
+                    if insert_pos != -1:
+                        new_content = new_content[:insert_pos] + '\n' + addition + new_content[insert_pos:]
+                    else:
+                        new_content = new_content + '\n' + addition
+                else:
+                    return False, f"Could not apply addition-only hunk: context hint '{hunk.context_hint}' not found"
+            else:
+                return False, "Could not apply addition-only hunk: no context lines and no context hint to determine insertion point"
     
     # Write new content
     write_result = file_ops.write_file(op.file_path, new_content)
