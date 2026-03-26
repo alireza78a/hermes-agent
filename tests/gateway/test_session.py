@@ -765,3 +765,42 @@ class TestLastPromptTokens:
             billing_base_url=None,
             model="openai/gpt-5.4",
         )
+
+
+class TestRewriteTranscriptPreservesReasoning:
+    """rewrite_transcript must not drop reasoning fields from SQLite."""
+
+    def test_reasoning_survives_rewrite(self, tmp_path):
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "test.db")
+        session_id = "reasoning-test"
+        db.create_session(session_id=session_id, source="cli")
+
+        # Insert a message WITH reasoning via the same path the agent uses
+        db.append_message(
+            session_id=session_id,
+            role="assistant",
+            content="The answer is 42.",
+            reasoning="I need to think step by step.",
+        )
+
+        # Verify reasoning was stored
+        before = db.get_messages_as_conversation(session_id)
+        assert before[0].get("reasoning") == "I need to think step by step."
+
+        # Now simulate /retry: build the SessionStore and call rewrite_transcript
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._db = db
+        store._loaded = True
+
+        # rewrite_transcript receives the messages that load_transcript returned
+        store.rewrite_transcript(session_id, before)
+
+        # Load again — reasoning must still be present
+        after = db.get_messages_as_conversation(session_id)
+        assert after[0].get("reasoning") == "I need to think step by step.", (
+            "rewrite_transcript dropped reasoning field from SQLite"
+        )
