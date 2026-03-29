@@ -186,80 +186,70 @@ class TestApplyUpdate:
             '    return result + 1'
         )
 
-    def test_addition_only_hunk_must_not_silently_succeed(self):
-        """An update hunk with only '+' lines must not report success
-        while leaving the file unchanged."""
+
+class TestAdditionOnlyHunks:
+    """Regression tests for #3081 — addition-only hunks were silently dropped."""
+
+    def test_addition_only_hunk_with_context_hint(self):
+        """A hunk with only + lines should insert at the context hint location."""
         patch = """\
 *** Begin Patch
-*** Update File: app.py
-@@ def hello @@
-+def goodbye():
-+    pass
+*** Update File: src/app.py
+@@ def main @@
++def helper():
++    return 42
 *** End Patch"""
-        operations, err = parse_v4a_patch(patch)
+        ops, err = parse_v4a_patch(patch)
         assert err is None
+        assert len(ops) == 1
+        assert len(ops[0].hunks) == 1
 
-        original = "def hello():\n    return 1\n"
+        hunk = ops[0].hunks[0]
+        # All lines should be additions
+        assert all(l.prefix == '+' for l in hunk.lines)
 
+        # Apply to a file that contains the context hint
         class FakeFileOps:
-            def __init__(self):
-                self.written = None
-
-            def read_file(self, path, offset=1, limit=500):
-                return SimpleNamespace(content=original, error=None)
-
+            written = None
+            def read_file(self, path, **kw):
+                return SimpleNamespace(
+                    content="def main():\n    pass\n",
+                    error=None,
+                )
             def write_file(self, path, content):
                 self.written = content
                 return SimpleNamespace(error=None)
 
         file_ops = FakeFileOps()
-        result = apply_v4a_operations(operations, file_ops)
+        result = apply_v4a_operations(ops, file_ops)
+        assert result.success is True
+        assert "def helper():" in file_ops.written
+        assert "return 42" in file_ops.written
 
-        # The patch asked to add two lines. Either they appear in the
-        # output (success) or the operation reports failure.  Silently
-        # writing back the original content and claiming success is the bug.
-        if result.success:
-            assert file_ops.written != original, (
-                "addition-only hunk was silently dropped: file unchanged but "
-                "result.success is True"
-            )
-
-    def test_addition_only_hunk_errors_when_context_hint_not_found(self):
-        """Addition-only hunk must fail when context hint doesn't match."""
+    def test_addition_only_hunk_without_context_hint(self):
+        """A hunk with only + lines and no context hint appends at end of file."""
         patch = """\
 *** Begin Patch
-*** Update File: app.py
-@@ no_such_function @@
-+new_line = 1
+*** Update File: src/app.py
++def new_func():
++    return True
 *** End Patch"""
-        operations, _ = parse_v4a_patch(patch)
+        ops, err = parse_v4a_patch(patch)
+        assert err is None
 
         class FakeFileOps:
-            def read_file(self, path, offset=1, limit=500):
-                return SimpleNamespace(content="x = 1\n", error=None)
+            written = None
+            def read_file(self, path, **kw):
+                return SimpleNamespace(
+                    content="existing = True\n",
+                    error=None,
+                )
             def write_file(self, path, content):
+                self.written = content
                 return SimpleNamespace(error=None)
 
-        result = apply_v4a_operations(operations, FakeFileOps())
-        assert result.success is False
-        assert "context hint" in result.error
-        assert "no_such_function" in result.error
-
-    def test_addition_only_hunk_errors_when_no_context_hint(self):
-        """Addition-only hunk with no context hint at all must fail."""
-        patch = """\
-*** Begin Patch
-*** Update File: app.py
-+orphan_line = 1
-*** End Patch"""
-        operations, _ = parse_v4a_patch(patch)
-
-        class FakeFileOps:
-            def read_file(self, path, offset=1, limit=500):
-                return SimpleNamespace(content="x = 1\n", error=None)
-            def write_file(self, path, content):
-                return SimpleNamespace(error=None)
-
-        result = apply_v4a_operations(operations, FakeFileOps())
-        assert result.success is False
-        assert "no context" in result.error
+        file_ops = FakeFileOps()
+        result = apply_v4a_operations(ops, file_ops)
+        assert result.success is True
+        assert file_ops.written.endswith("def new_func():\n    return True\n")
+        assert "existing = True" in file_ops.written

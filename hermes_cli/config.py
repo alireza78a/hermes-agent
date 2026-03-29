@@ -138,6 +138,12 @@ DEFAULT_CONFIG = {
     "toolsets": ["hermes-cli"],
     "agent": {
         "max_turns": 90,
+        # Tool-use enforcement: injects system prompt guidance that tells the
+        # model to actually call tools instead of describing intended actions.
+        # Values: "auto" (default — applies to gpt/codex models), true/false
+        # (force on/off for all models), or a list of model-name substrings
+        # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
+        "tool_use_enforcement": "auto",
     },
     
     "terminal": {
@@ -221,42 +227,49 @@ DEFAULT_CONFIG = {
             "model": "",
             "base_url": "",
             "api_key": "",
+            "timeout": 30,         # seconds — increase for slow local models
         },
         "compression": {
             "provider": "auto",
             "model": "",
             "base_url": "",
             "api_key": "",
+            "timeout": 120,        # seconds — compression summarises large contexts; increase for local models
         },
         "session_search": {
             "provider": "auto",
             "model": "",
             "base_url": "",
             "api_key": "",
+            "timeout": 30,
         },
         "skills_hub": {
             "provider": "auto",
             "model": "",
             "base_url": "",
             "api_key": "",
+            "timeout": 30,
         },
         "approval": {
             "provider": "auto",
             "model": "",           # fast/cheap model recommended (e.g. gemini-flash, haiku)
             "base_url": "",
             "api_key": "",
+            "timeout": 30,
         },
         "mcp": {
             "provider": "auto",
             "model": "",
             "base_url": "",
             "api_key": "",
+            "timeout": 30,
         },
         "flush_memories": {
             "provider": "auto",
             "model": "",
             "base_url": "",
             "api_key": "",
+            "timeout": 30,
         },
     },
     
@@ -264,11 +277,13 @@ DEFAULT_CONFIG = {
         "compact": False,
         "personality": "kawaii",
         "resume_display": "full",
+        "busy_input_mode": "interrupt",
         "bell_on_complete": False,
         "show_reasoning": False,
         "streaming": False,
         "show_cost": False,       # Show $ cost in the status bar (off by default)
         "skin": "default",
+        "tool_progress_command": False,  # Enable /verbose command in messaging gateway
     },
 
     # Privacy settings
@@ -545,14 +560,14 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
     },
     "DASHSCOPE_API_KEY": {
-        "description": "Alibaba Cloud DashScope API key for Qwen models",
+        "description": "Alibaba Cloud DashScope API key (Qwen + multi-provider models)",
         "prompt": "DashScope API Key",
         "url": "https://modelstudio.console.alibabacloud.com/",
         "password": True,
         "category": "provider",
     },
     "DASHSCOPE_BASE_URL": {
-        "description": "Custom DashScope base URL (default: international endpoint)",
+        "description": "Custom DashScope base URL (default: coding-intl OpenAI-compat endpoint)",
         "prompt": "DashScope Base URL",
         "url": "",
         "password": False,
@@ -586,6 +601,21 @@ OPTIONAL_ENV_VARS = {
     "OPENCODE_GO_BASE_URL": {
         "description": "OpenCode Go base URL override",
         "prompt": "OpenCode Go base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
+    "HF_TOKEN": {
+        "description": "Hugging Face token for Inference Providers (20+ open models via router.huggingface.co)",
+        "prompt": "Hugging Face Token",
+        "url": "https://huggingface.co/settings/tokens",
+        "password": True,
+        "category": "provider",
+    },
+    "HF_BASE_URL": {
+        "description": "Hugging Face Inference Providers base URL override",
+        "prompt": "HF base URL (leave empty for default)",
         "url": None,
         "password": False,
         "category": "provider",

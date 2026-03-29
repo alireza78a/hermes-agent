@@ -231,7 +231,7 @@ class KawaiiSpinner:
         "analyzing", "computing", "synthesizing", "formulating", "brainstorming",
     ]
 
-    def __init__(self, message: str = "", spinner_type: str = 'dots'):
+    def __init__(self, message: str = "", spinner_type: str = 'dots', print_fn=None):
         self.message = message
         self.spinner_frames = self.SPINNERS.get(spinner_type, self.SPINNERS['dots'])
         self.running = False
@@ -239,12 +239,26 @@ class KawaiiSpinner:
         self.frame_idx = 0
         self.start_time = None
         self.last_line_len = 0
+        # Optional callable to route all output through (e.g. a no-op for silent
+        # background agents).  When set, bypasses self._out entirely so that
+        # agents with _print_fn overridden remain fully silent.
+        self._print_fn = print_fn
         # Capture stdout NOW, before any redirect_stdout(devnull) from
         # child agents can replace sys.stdout with a black hole.
         self._out = sys.stdout
 
     def _write(self, text: str, end: str = '\n', flush: bool = False):
-        """Write to the stdout captured at spinner creation time."""
+        """Write to the stdout captured at spinner creation time.
+
+        If a print_fn was supplied at construction, all output is routed through
+        it instead — allowing callers to silence the spinner with a no-op lambda.
+        """
+        if self._print_fn is not None:
+            try:
+                self._print_fn(text)
+            except Exception:
+                pass
+            return
         try:
             self._out.write(text + end)
             if flush:
@@ -270,11 +284,11 @@ class KawaiiSpinner:
         The CLI already drives a TUI widget (_spinner_text) for spinner display,
         so KawaiiSpinner's \\r-based animation is redundant under StdoutProxy.
         """
-        out = self._out
-        # StdoutProxy has a 'raw' attribute (bool) that plain file objects lack.
-        if hasattr(out, 'raw') and type(out).__name__ == 'StdoutProxy':
-            return True
-        return False
+        try:
+            from prompt_toolkit.patch_stdout import StdoutProxy
+            return isinstance(self._out, StdoutProxy)
+        except ImportError:
+            return False
 
     def _animate(self):
         # When stdout is not a real terminal (e.g. Docker, systemd, pipe),
@@ -685,7 +699,7 @@ def format_context_pressure(
         threshold_percent: Compaction threshold as a fraction of context window.
         compression_enabled: Whether auto-compression is active.
     """
-    pct_int = int(compaction_progress * 100)
+    pct_int = min(int(compaction_progress * 100), 100)
     filled = min(int(compaction_progress * _BAR_WIDTH), _BAR_WIDTH)
     bar = _BAR_FILLED * filled + _BAR_EMPTY * (_BAR_WIDTH - filled)
 
@@ -715,7 +729,7 @@ def format_context_pressure_gateway(
     No ANSI — just Unicode and plain text suitable for Telegram/Discord/etc.
     The percentage shows progress toward the compaction threshold.
     """
-    pct_int = int(compaction_progress * 100)
+    pct_int = min(int(compaction_progress * 100), 100)
     filled = min(int(compaction_progress * _BAR_WIDTH), _BAR_WIDTH)
     bar = _BAR_FILLED * filled + _BAR_EMPTY * (_BAR_WIDTH - filled)
 

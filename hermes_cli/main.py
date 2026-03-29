@@ -513,6 +513,10 @@ def cmd_chat(args):
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
 
+    # --source: tag session source for filtering (e.g. 'tool' for third-party integrations)
+    if getattr(args, "source", None):
+        os.environ["HERMES_SESSION_SOURCE"] = args.source
+
     # Import and run the CLI
     from cli import main as cli_main
     
@@ -791,6 +795,7 @@ def cmd_model(args):
         "ai-gateway": "AI Gateway",
         "kilocode": "Kilo Code",
         "alibaba": "Alibaba Cloud (DashScope)",
+        "huggingface": "Hugging Face",
         "custom": "Custom endpoint",
     }
     active_label = provider_labels.get(active, active)
@@ -816,7 +821,8 @@ def cmd_model(args):
         ("opencode-zen", "OpenCode Zen (35+ curated models, pay-as-you-go)"),
         ("opencode-go", "OpenCode Go (open models, $10/month subscription)"),
         ("ai-gateway", "AI Gateway (Vercel — 200+ models, pay-per-use)"),
-        ("alibaba", "Alibaba Cloud / DashScope (Qwen models, Anthropic-compatible)"),
+        ("alibaba", "Alibaba Cloud / DashScope Coding (Qwen + multi-provider)"),
+        ("huggingface", "Hugging Face Inference Providers (20+ open models)"),
     ]
 
     # Add user-defined custom providers from config.yaml
@@ -826,8 +832,8 @@ def cmd_model(args):
         for entry in custom_providers_cfg:
             if not isinstance(entry, dict):
                 continue
-            name = entry.get("name", "").strip()
-            base_url = entry.get("base_url", "").strip()
+            name = (entry.get("name") or "").strip()
+            base_url = (entry.get("base_url") or "").strip()
             if not name or not base_url:
                 continue
             # Generate a stable key from the name
@@ -889,7 +895,7 @@ def cmd_model(args):
         _model_flow_anthropic(config, current_model)
     elif selected_provider == "kimi-coding":
         _model_flow_kimi(config, current_model)
-    elif selected_provider in ("zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba"):
+    elif selected_provider in ("zai", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
 
@@ -1498,6 +1504,18 @@ _PROVIDER_MODELS = {
         "google/gemini-3-pro-preview",
         "google/gemini-3-flash-preview",
     ],
+    # Curated HF model list — only agentic models that map to OpenRouter defaults.
+    # Format: HF model ID → OpenRouter equivalent noted in comment
+    "huggingface": [
+        "Qwen/Qwen3.5-397B-A17B",                  # ↔ qwen/qwen3.5-plus
+        "Qwen/Qwen3.5-35B-A3B",                     # ↔ qwen/qwen3.5-35b-a3b
+        "deepseek-ai/DeepSeek-V3.2",                # ↔ deepseek/deepseek-chat
+        "moonshotai/Kimi-K2.5",                      # ↔ moonshotai/kimi-k2.5
+        "MiniMaxAI/MiniMax-M2.5",                    # ↔ minimax/minimax-m2.5
+        "zai-org/GLM-5",                             # ↔ z-ai/glm-5
+        "XiaomiMiMo/MiMo-V2-Flash",                 # ↔ xiaomi/mimo-v2-pro
+        "moonshotai/Kimi-K2-Thinking",               # ↔ moonshotai/kimi-k2-thinking
+    ],
 }
 
 
@@ -2027,19 +2045,25 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
         save_env_value(base_url_env, override)
         effective_base = override
 
-    # Model selection — try live /models endpoint first, fall back to defaults
-    from hermes_cli.models import fetch_api_models
-    api_key_for_probe = existing_key or (get_env_value(key_env) if key_env else "")
-    live_models = fetch_api_models(api_key_for_probe, effective_base)
+    # Model selection — try live /models endpoint first, fall back to defaults.
+    # Providers with large live catalogs (100+ models) use a curated list instead
+    # so users see familiar model names rather than an overwhelming dump.
+    curated = _PROVIDER_MODELS.get(provider_id, [])
+    if curated and len(curated) >= 8:
+        # Curated list is substantial — use it directly, skip live probe
+        live_models = None
+    else:
+        from hermes_cli.models import fetch_api_models
+        api_key_for_probe = existing_key or (get_env_value(key_env) if key_env else "")
+        live_models = fetch_api_models(api_key_for_probe, effective_base)
 
     if live_models:
         model_list = live_models
         print(f"  Found {len(model_list)} model(s) from {pconfig.name} API")
     else:
-        model_list = _PROVIDER_MODELS.get(provider_id, [])
+        model_list = curated
         if model_list:
-            print("  ⚠ Could not auto-detect models from API — showing defaults.")
-            print("    Use \"Enter custom model name\" if you don't see your model.")
+            print(f"  Showing {len(model_list)} curated models — use \"Enter custom model name\" for others.")
         # else: no defaults either, will fall through to raw input
 
     if model_list:
@@ -2315,6 +2339,12 @@ def cmd_cron(args):
     cron_command(args)
 
 
+def cmd_webhook(args):
+    """Webhook subscription management."""
+    from hermes_cli.webhook import webhook_command
+    webhook_command(args)
+
+
 def cmd_doctor(args):
     """Check configuration and dependencies."""
     from hermes_cli.doctor import run_doctor
@@ -2383,6 +2413,12 @@ def _update_via_zip(args):
         
         print("→ Extracting...")
         with zipfile.ZipFile(zip_path, 'r') as zf:
+            # Validate paths to prevent zip-slip (path traversal)
+            tmp_dir_real = os.path.realpath(tmp_dir)
+            for member in zf.infolist():
+                member_path = os.path.realpath(os.path.join(tmp_dir, member.filename))
+                if not member_path.startswith(tmp_dir_real + os.sep) and member_path != tmp_dir_real:
+                    raise ValueError(f"Zip-slip detected: {member.filename} escapes extraction directory")
             zf.extractall(tmp_dir)
         
         # GitHub ZIPs extract to hermes-agent-<branch>/
@@ -2440,8 +2476,18 @@ def _update_via_zip(args):
             )
     else:
         # Use sys.executable to explicitly call the venv's pip module,
-        # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu
+        # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
+        # Some environments lose pip inside the venv; bootstrap it back with
+        # ensurepip before trying the editable install.
         pip_cmd = [sys.executable, "-m", "pip"]
+        try:
+            subprocess.run(pip_cmd + ["--version"], cwd=PROJECT_ROOT, check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(
+                [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+                cwd=PROJECT_ROOT,
+                check=True,
+            )
         try:
             subprocess.run(pip_cmd + ["install", "-e", ".[all]", "--quiet"], cwd=PROJECT_ROOT, check=True)
         except subprocess.CalledProcessError:
@@ -2602,7 +2648,12 @@ def _restore_stashed_changes(
             print("Resolve conflicts manually, then run: git stash drop")
 
         print(f"Restore your changes with: git stash apply {stash_ref}")
-        sys.exit(1)
+        # In non-interactive mode (gateway /update), don't abort — the code
+        # update itself succeeded, only the stash restore had conflicts.
+        # Aborting would report the entire update as failed.
+        if prompt_user:
+            sys.exit(1)
+        return False
 
     stash_selector = _resolve_stash_selector(git_cmd, cwd, stash_ref)
     if stash_selector is None:
@@ -2676,30 +2727,60 @@ def cmd_update(args):
 
     # Fetch and pull
     try:
-        print("→ Fetching updates...")
         git_cmd = ["git"]
         if sys.platform == "win32":
             git_cmd = ["git", "-c", "windows.appendAtomically=false"]
-        
-        subprocess.run(git_cmd + ["fetch", "origin"], cwd=PROJECT_ROOT, check=True)
-        
-        # Get current branch
+
+        print("→ Fetching updates...")
+        fetch_result = subprocess.run(
+            git_cmd + ["fetch", "origin"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if fetch_result.returncode != 0:
+            stderr = fetch_result.stderr.strip()
+            if "Could not resolve host" in stderr or "unable to access" in stderr:
+                print("✗ Network error — cannot reach the remote repository.")
+                print(f"  {stderr.splitlines()[0]}" if stderr else "")
+            elif "Authentication failed" in stderr or "could not read Username" in stderr:
+                print("✗ Authentication failed — check your git credentials or SSH key.")
+            else:
+                print(f"✗ Failed to fetch updates from origin.")
+                if stderr:
+                    print(f"  {stderr.splitlines()[0]}")
+            sys.exit(1)
+
+        # Get current branch (returns literal "HEAD" when detached)
         result = subprocess.run(
             git_cmd + ["rev-parse", "--abbrev-ref", "HEAD"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
-        branch = result.stdout.strip()
+        current_branch = result.stdout.strip()
 
-        # Fall back to main if the current branch doesn't exist on the remote
-        verify = subprocess.run(
-            git_cmd + ["rev-parse", "--verify", f"origin/{branch}"],
-            cwd=PROJECT_ROOT, capture_output=True, text=True,
-        )
-        if verify.returncode != 0:
-            branch = "main"
+        # Always update against main
+        branch = "main"
+
+        # If user is on a non-main branch or detached HEAD, switch to main
+        if current_branch != "main":
+            label = "detached HEAD" if current_branch == "HEAD" else f"branch '{current_branch}'"
+            print(f"  ⚠ Currently on {label} — switching to main for update...")
+            # Stash before checkout so uncommitted work isn't lost
+            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+            subprocess.run(
+                git_cmd + ["checkout", "main"],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        else:
+            auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
+
+        prompt_for_restore = auto_stash_ref is not None and sys.stdin.isatty() and sys.stdout.isatty()
 
         # Check if there are updates
         result = subprocess.run(
@@ -2707,31 +2788,69 @@ def cmd_update(args):
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
         commit_count = int(result.stdout.strip())
-        
+
         if commit_count == 0:
             _invalidate_update_cache()
-            print("✓ Already up to date!")
-            return
-        
-        print(f"→ Found {commit_count} new commit(s)")
-
-        auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
-        prompt_for_restore = auto_stash_ref is not None and sys.stdin.isatty() and sys.stdout.isatty()
-
-        print("→ Pulling updates...")
-        try:
-            subprocess.run(git_cmd + ["pull", "--ff-only", "origin", branch], cwd=PROJECT_ROOT, check=True)
-        finally:
+            # Restore stash and switch back to original branch if we moved
             if auto_stash_ref is not None:
                 _restore_stashed_changes(
-                    git_cmd,
-                    PROJECT_ROOT,
-                    auto_stash_ref,
+                    git_cmd, PROJECT_ROOT, auto_stash_ref,
                     prompt_user=prompt_for_restore,
                 )
+            if current_branch not in ("main", "HEAD"):
+                subprocess.run(
+                    git_cmd + ["checkout", current_branch],
+                    cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
+                )
+            print("✓ Already up to date!")
+            return
+
+        print(f"→ Found {commit_count} new commit(s)")
+
+        print("→ Pulling updates...")
+        update_succeeded = False
+        try:
+            pull_result = subprocess.run(
+                git_cmd + ["pull", "--ff-only", "origin", branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if pull_result.returncode != 0:
+                # ff-only failed — local and remote have diverged (e.g. upstream
+                # force-pushed or rebase).  Since local changes are already
+                # stashed, reset to match the remote exactly.
+                print("  ⚠ Fast-forward not possible (history diverged), resetting to match remote...")
+                reset_result = subprocess.run(
+                    git_cmd + ["reset", "--hard", f"origin/{branch}"],
+                    cwd=PROJECT_ROOT,
+                    capture_output=True,
+                    text=True,
+                )
+                if reset_result.returncode != 0:
+                    print(f"✗ Failed to reset to origin/{branch}.")
+                    if reset_result.stderr.strip():
+                        print(f"  {reset_result.stderr.strip()}")
+                    print("  Try manually: git fetch origin && git reset --hard origin/main")
+                    sys.exit(1)
+            update_succeeded = True
+        finally:
+            if auto_stash_ref is not None:
+                # Don't attempt stash restore if the code update itself failed —
+                # working tree is in an unknown state.
+                if not update_succeeded:
+                    print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
+                    print(f"  Restore manually with: git stash apply")
+                else:
+                    _restore_stashed_changes(
+                        git_cmd,
+                        PROJECT_ROOT,
+                        auto_stash_ref,
+                        prompt_user=prompt_for_restore,
+                    )
         
         _invalidate_update_cache()
         
@@ -2754,8 +2873,18 @@ def cmd_update(args):
                 )
         else:
             # Use sys.executable to explicitly call the venv's pip module,
-            # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu
+            # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
+            # Some environments lose pip inside the venv; bootstrap it back with
+            # ensurepip before trying the editable install.
             pip_cmd = [sys.executable, "-m", "pip"]
+            try:
+                subprocess.run(pip_cmd + ["--version"], cwd=PROJECT_ROOT, check=True, capture_output=True)
+            except subprocess.CalledProcessError:
+                subprocess.run(
+                    [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
+                    cwd=PROJECT_ROOT,
+                    check=True,
+                )
             try:
                 subprocess.run(pip_cmd + ["install", "-e", ".[all]", "--quiet"], cwd=PROJECT_ROOT, check=True)
             except subprocess.CalledProcessError:
@@ -2814,10 +2943,15 @@ def cmd_update(args):
                 print(f"  ℹ️  {len(missing_config)} new config option(s) available")
             
             print()
-            if sys.stdin.isatty():
-                response = input("Would you like to configure them now? [Y/n]: ").strip().lower()
-            else:
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                print("  ℹ Non-interactive session — skipping config migration prompt.")
+                print("    Run 'hermes config migrate' later to apply any new config/env options.")
                 response = "n"
+            else:
+                try:
+                    response = input("Would you like to configure them now? [Y/n]: ").strip().lower()
+                except EOFError:
+                    response = "n"
             
             if response in ('', 'y', 'yes'):
                 print()
@@ -2865,10 +2999,11 @@ def cmd_update(args):
             # Check for macOS launchd service
             if is_macos():
                 try:
+                    from hermes_cli.gateway import get_launchd_label
                     plist_path = get_launchd_plist_path()
                     if plist_path.exists():
                         check = subprocess.run(
-                            ["launchctl", "list", "ai.hermes.gateway"],
+                            ["launchctl", "list", get_launchd_label()],
                             capture_output=True, text=True, timeout=5,
                         )
                         has_launchd_service = check.returncode == 0
@@ -2924,12 +3059,13 @@ def cmd_update(args):
                     # after a manual SIGTERM, which would race with the
                     # PID file cleanup.
                     print("→ Restarting gateway service...")
+                    _launchd_label = get_launchd_label()
                     stop = subprocess.run(
-                        ["launchctl", "stop", "ai.hermes.gateway"],
+                        ["launchctl", "stop", _launchd_label],
                         capture_output=True, text=True, timeout=10,
                     )
                     start = subprocess.run(
-                        ["launchctl", "start", "ai.hermes.gateway"],
+                        ["launchctl", "start", _launchd_label],
                         capture_output=True, text=True, timeout=10,
                     )
                     if start.returncode == 0:
@@ -3112,7 +3248,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
         default=None,
         help="Inference provider (default: auto)"
     )
@@ -3163,6 +3299,11 @@ For more help on a command:
         action="store_true",
         default=False,
         help="Include the session ID in the agent's system prompt"
+    )
+    chat_parser.add_argument(
+        "--source",
+        default=None,
+        help="Session source tag for filtering (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists."
     )
     chat_parser.set_defaults(func=cmd_chat)
 
@@ -3408,7 +3549,38 @@ For more help on a command:
     cron_subparsers.add_parser("tick", help="Run due jobs once and exit")
 
     cron_parser.set_defaults(func=cmd_cron)
-    
+
+    # =========================================================================
+    # webhook command
+    # =========================================================================
+    webhook_parser = subparsers.add_parser(
+        "webhook",
+        help="Manage dynamic webhook subscriptions",
+        description="Create, list, and remove webhook subscriptions for event-driven agent activation",
+    )
+    webhook_subparsers = webhook_parser.add_subparsers(dest="webhook_action")
+
+    wh_sub = webhook_subparsers.add_parser("subscribe", aliases=["add"], help="Create a webhook subscription")
+    wh_sub.add_argument("name", help="Route name (used in URL: /webhooks/<name>)")
+    wh_sub.add_argument("--prompt", default="", help="Prompt template with {dot.notation} payload refs")
+    wh_sub.add_argument("--events", default="", help="Comma-separated event types to accept")
+    wh_sub.add_argument("--description", default="", help="What this subscription does")
+    wh_sub.add_argument("--skills", default="", help="Comma-separated skill names to load")
+    wh_sub.add_argument("--deliver", default="log", help="Delivery target: log, telegram, discord, slack, etc.")
+    wh_sub.add_argument("--deliver-chat-id", default="", help="Target chat ID for cross-platform delivery")
+    wh_sub.add_argument("--secret", default="", help="HMAC secret (auto-generated if omitted)")
+
+    webhook_subparsers.add_parser("list", aliases=["ls"], help="List all dynamic subscriptions")
+
+    wh_rm = webhook_subparsers.add_parser("remove", aliases=["rm"], help="Remove a subscription")
+    wh_rm.add_argument("name", help="Subscription name to remove")
+
+    wh_test = webhook_subparsers.add_parser("test", help="Send a test POST to a webhook route")
+    wh_test.add_argument("name", help="Subscription name to test")
+    wh_test.add_argument("--payload", default="", help="JSON payload to send (default: test payload)")
+
+    webhook_parser.set_defaults(func=cmd_webhook)
+
     # =========================================================================
     # doctor command
     # =========================================================================
@@ -3541,7 +3713,7 @@ For more help on a command:
     skills_snapshot = skills_subparsers.add_parser("snapshot", help="Export/import skill configurations")
     snapshot_subparsers = skills_snapshot.add_subparsers(dest="snapshot_action")
     snap_export = snapshot_subparsers.add_parser("export", help="Export installed skills to a file")
-    snap_export.add_argument("output", help="Output JSON file path")
+    snap_export.add_argument("output", help="Output JSON file path (use - for stdout)")
     snap_import = snapshot_subparsers.add_parser("import", help="Import and install skills from a file")
     snap_import.add_argument("input", help="Input JSON file path")
     snap_import.add_argument("--force", action="store_true", help="Force install despite caution verdict")
@@ -3818,7 +3990,7 @@ For more help on a command:
     sessions_list.add_argument("--limit", type=int, default=20, help="Max sessions to show")
 
     sessions_export = sessions_subparsers.add_parser("export", help="Export sessions to a JSONL file")
-    sessions_export.add_argument("output", help="Output JSONL file path")
+    sessions_export.add_argument("output", help="Output JSONL file path (use - for stdout)")
     sessions_export.add_argument("--source", help="Filter by source")
     sessions_export.add_argument("--session-id", help="Export a specific session")
 
@@ -3862,8 +4034,12 @@ For more help on a command:
 
         action = args.sessions_action
 
+        # Hide third-party tool sessions by default, but honour explicit --source
+        _source = getattr(args, "source", None)
+        _exclude = None if _source else ["tool"]
+
         if action == "list":
-            sessions = db.list_sessions_rich(source=args.source, limit=args.limit)
+            sessions = db.list_sessions_rich(source=args.source, exclude_sources=_exclude, limit=args.limit)
             if not sessions:
                 print("No sessions found.")
                 return
@@ -3895,15 +4071,25 @@ For more help on a command:
                 if not data:
                     print(f"Session '{args.session_id}' not found.")
                     return
-                with open(args.output, "w", encoding="utf-8") as f:
-                    f.write(_json.dumps(data, ensure_ascii=False) + "\n")
-                print(f"Exported 1 session to {args.output}")
+                line = _json.dumps(data, ensure_ascii=False) + "\n"
+                if args.output == "-":
+                    import sys
+                    sys.stdout.write(line)
+                else:
+                    with open(args.output, "w", encoding="utf-8") as f:
+                        f.write(line)
+                    print(f"Exported 1 session to {args.output}")
             else:
                 sessions = db.export_all(source=args.source)
-                with open(args.output, "w", encoding="utf-8") as f:
+                if args.output == "-":
+                    import sys
                     for s in sessions:
-                        f.write(_json.dumps(s, ensure_ascii=False) + "\n")
-                print(f"Exported {len(sessions)} sessions to {args.output}")
+                        sys.stdout.write(_json.dumps(s, ensure_ascii=False) + "\n")
+                else:
+                    with open(args.output, "w", encoding="utf-8") as f:
+                        for s in sessions:
+                            f.write(_json.dumps(s, ensure_ascii=False) + "\n")
+                    print(f"Exported {len(sessions)} sessions to {args.output}")
 
         elif action == "delete":
             resolved_session_id = db.resolve_session_id(args.session_id)
@@ -3946,7 +4132,8 @@ For more help on a command:
         elif action == "browse":
             limit = getattr(args, "limit", 50) or 50
             source = getattr(args, "source", None)
-            sessions = db.list_sessions_rich(source=source, limit=limit)
+            _browse_exclude = None if source else ["tool"]
+            sessions = db.list_sessions_rich(source=source, exclude_sources=_browse_exclude, limit=limit)
             db.close()
             if not sessions:
                 print("No sessions found.")

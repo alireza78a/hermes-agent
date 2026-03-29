@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cron.jobs import get_due_jobs, mark_job_run, save_job_output
+from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
 
 # Sentinel: when a cron agent has nothing new to report, it can start its
 # response with this marker to suppress delivery.  Output is still saved
@@ -474,11 +474,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         if _session_db:
             try:
                 _session_db.end_session(_cron_session_id, "cron_complete")
-            except Exception as e:
+            except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to end session: %s", job_id, e)
             try:
                 _session_db.close()
-            except Exception as e:
+            except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)
 
 
@@ -524,6 +524,12 @@ def tick(verbose: bool = True) -> int:
         executed = 0
         for job in due_jobs:
             try:
+                # For recurring jobs (cron/interval), advance next_run_at to the
+                # next future occurrence BEFORE execution.  This way, if the
+                # process crashes mid-run, the job won't re-fire on restart.
+                # One-shot jobs are left alone so they can retry on restart.
+                advance_next_run(job["id"])
+
                 success, output, final_response, error = run_job(job)
 
                 output_file = save_job_output(job["id"], output)

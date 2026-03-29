@@ -80,6 +80,11 @@ _DEFAULT_PROVIDER_MODELS = {
     "minimax-cn": ["MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1"],
     "ai-gateway": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5", "google/gemini-3-flash"],
     "kilocode": ["anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-3-pro-preview", "google/gemini-3-flash-preview"],
+    "huggingface": [
+        "Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct", "deepseek-ai/DeepSeek-R1-0528",
+        "deepseek-ai/DeepSeek-V3.2", "moonshotai/Kimi-K2.5",
+    ],
 }
 
 
@@ -884,6 +889,7 @@ def setup_model_provider(config: dict):
         "OpenCode Go (open models, $10/month subscription)",
         "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
         "GitHub Copilot ACP (spawns `copilot --acp --stdio`)",
+        "Hugging Face Inference Providers (20+ open models)",
     ]
     if keep_label:
         provider_choices.append(keep_label)
@@ -1528,7 +1534,26 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "copilot-acp", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    # else: provider_idx == 16 (Keep current) — only shown when a provider already exists
+    elif provider_idx == 16:  # Hugging Face Inference Providers
+        selected_provider = "huggingface"
+        print()
+        print_header("Hugging Face API Token")
+        pconfig = PROVIDER_REGISTRY["huggingface"]
+        print_info(f"Provider: {pconfig.name}")
+        print_info("Get your token at: https://huggingface.co/settings/tokens")
+        print_info("Required permission: 'Make calls to Inference Providers'")
+        print()
+
+        api_key = prompt("  HF Token", password=True)
+        if api_key:
+            save_env_value("HF_TOKEN", api_key)
+            # Clear OpenRouter env vars to prevent routing confusion
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _set_model_provider(config, "huggingface", pconfig.inference_base_url)
+        selected_base_url = pconfig.inference_base_url
+
+    # else: provider_idx == 17 (Keep current) — only shown when a provider already exists
     # Normalize "keep current" to an explicit provider so downstream logic
     # doesn't fall back to the generic OpenRouter/static-model path.
     if selected_provider is None:
@@ -2067,11 +2092,11 @@ def setup_terminal_backend(config: dict):
         print_info("Serverless cloud sandboxes. Each session gets its own container.")
         print_info("Requires a Modal account: https://modal.com")
 
-        # Check if swe-rex[modal] is installed
+        # Check if modal SDK is installed
         try:
-            __import__("swe_rex")
+            __import__("modal")
         except ImportError:
-            print_info("Installing swe-rex[modal]...")
+            print_info("Installing modal SDK...")
             import subprocess
 
             uv_bin = shutil.which("uv")
@@ -2083,22 +2108,22 @@ def setup_terminal_backend(config: dict):
                         "install",
                         "--python",
                         sys.executable,
-                        "swe-rex[modal]",
+                        "modal",
                     ],
                     capture_output=True,
                     text=True,
                 )
             else:
                 result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "swe-rex[modal]"],
+                    [sys.executable, "-m", "pip", "install", "modal"],
                     capture_output=True,
                     text=True,
                 )
             if result.returncode == 0:
-                print_success("swe-rex[modal] installed")
+                print_success("modal SDK installed")
             else:
                 print_warning(
-                    "Install failed — run manually: pip install 'swe-rex[modal]'"
+                    "Install failed — run manually: pip install modal"
                 )
 
         # Modal token
@@ -2969,6 +2994,95 @@ def setup_tools(config: dict, first_install: bool = False):
 
 
 # =============================================================================
+# Post-Migration Section Skip Logic
+# =============================================================================
+
+
+def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]:
+    """Return a short summary if a setup section is already configured, else None.
+
+    Used after OpenClaw migration to detect which sections can be skipped.
+    ``get_env_value`` is the module-level import from hermes_cli.config
+    so that test patches on ``setup_mod.get_env_value`` take effect.
+    """
+    if section_key == "model":
+        has_key = bool(
+            get_env_value("OPENROUTER_API_KEY")
+            or get_env_value("OPENAI_API_KEY")
+            or get_env_value("ANTHROPIC_API_KEY")
+        )
+        if not has_key:
+            # Check for OAuth providers
+            try:
+                from hermes_cli.auth import get_active_provider
+                if get_active_provider():
+                    has_key = True
+            except Exception:
+                pass
+        if not has_key:
+            return None
+        model = config.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+        if isinstance(model, dict):
+            return str(model.get("default") or model.get("model") or "configured")
+        return "configured"
+
+    elif section_key == "terminal":
+        backend = config.get("terminal", {}).get("backend", "local")
+        return f"backend: {backend}"
+
+    elif section_key == "agent":
+        max_turns = config.get("agent", {}).get("max_turns", 90)
+        return f"max turns: {max_turns}"
+
+    elif section_key == "gateway":
+        platforms = []
+        if get_env_value("TELEGRAM_BOT_TOKEN"):
+            platforms.append("Telegram")
+        if get_env_value("DISCORD_BOT_TOKEN"):
+            platforms.append("Discord")
+        if get_env_value("SLACK_BOT_TOKEN"):
+            platforms.append("Slack")
+        if get_env_value("WHATSAPP_PHONE_NUMBER_ID"):
+            platforms.append("WhatsApp")
+        if get_env_value("SIGNAL_ACCOUNT"):
+            platforms.append("Signal")
+        if platforms:
+            return ", ".join(platforms)
+        return None  # No platforms configured — section must run
+
+    elif section_key == "tools":
+        tools = []
+        if get_env_value("ELEVENLABS_API_KEY"):
+            tools.append("TTS/ElevenLabs")
+        if get_env_value("BROWSERBASE_API_KEY"):
+            tools.append("Browser")
+        if get_env_value("FIRECRAWL_API_KEY"):
+            tools.append("Firecrawl")
+        if tools:
+            return ", ".join(tools)
+        return None
+
+    return None
+
+
+def _skip_configured_section(
+    config: dict, section_key: str, label: str
+) -> bool:
+    """Show an already-configured section summary and offer to skip.
+
+    Returns True if the user chose to skip, False if the section should run.
+    """
+    summary = _get_section_config_summary(config, section_key)
+    if not summary:
+        return False
+    print()
+    print_success(f"  {label}: {summary}")
+    return not prompt_yes_no(f"  Reconfigure {label.lower()}?", default=False)
+
+
+# =============================================================================
 # OpenClaw Migration
 # =============================================================================
 
@@ -3039,7 +3153,7 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
             target_root=hermes_home.resolve(),
             execute=True,
             workspace_target=None,
-            overwrite=False,
+            overwrite=True,
             migrate_secrets=True,
             output_dir=None,
             selected_options=selected,
@@ -3195,6 +3309,8 @@ def run_setup_wizard(args):
         )
     )
 
+    migration_ran = False
+
     if is_existing:
         # ── Returning User Menu ──
         print()
@@ -3264,7 +3380,8 @@ def run_setup_wizard(args):
             return
 
         # Offer OpenClaw migration before configuration begins
-        if _offer_openclaw_migration(hermes_home):
+        migration_ran = _offer_openclaw_migration(hermes_home)
+        if migration_ran:
             # Reload config in case migration wrote to it
             config = load_config()
 
@@ -3277,20 +3394,31 @@ def run_setup_wizard(args):
     print()
     print_info("You can edit these files directly or use 'hermes config edit'")
 
+    if migration_ran:
+        print()
+        print_info("Settings were imported from OpenClaw.")
+        print_info("Each section below will show what was imported — press Enter to keep,")
+        print_info("or choose to reconfigure if needed.")
+
     # Section 1: Model & Provider
-    setup_model_provider(config)
+    if not (migration_ran and _skip_configured_section(config, "model", "Model & Provider")):
+        setup_model_provider(config)
 
     # Section 2: Terminal Backend
-    setup_terminal_backend(config)
+    if not (migration_ran and _skip_configured_section(config, "terminal", "Terminal Backend")):
+        setup_terminal_backend(config)
 
     # Section 3: Agent Settings
-    setup_agent_settings(config)
+    if not (migration_ran and _skip_configured_section(config, "agent", "Agent Settings")):
+        setup_agent_settings(config)
 
     # Section 4: Messaging Platforms
-    setup_gateway(config)
+    if not (migration_ran and _skip_configured_section(config, "gateway", "Messaging Platforms")):
+        setup_gateway(config)
 
     # Section 5: Tools
-    setup_tools(config, first_install=not is_existing)
+    if not (migration_ran and _skip_configured_section(config, "tools", "Tools")):
+        setup_tools(config, first_install=not is_existing)
 
     # Save and show summary
     save_config(config)
